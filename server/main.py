@@ -1,81 +1,157 @@
+import socket
+import threading
+import json
 import pygame
+from dataclasses import dataclass, asdict
 from random import randint
-from dataclasses import dataclass
+import time
 
 @dataclass
 class Player:
-    pos: pygame.Vector2
-    rect: pygame.Rect
-    color: pygame.Color
+    pos: dict
+    rect: dict
+    color: str
 
 @dataclass
 class Ball:
-    pos: pygame.Vector2
-    rect: pygame.Rect
-    color: pygame.Color
-    velocity: pygame.Vector2
+    pos: dict
+    rect: dict
+    color: str
+    velocity: dict
 
-pygame.init()
-screen = pygame.display.set_mode((1280, 720))
-pygame.display.set_caption("Multiplayer pong")
-clock = pygame.time.Clock()
-running = True
+class PongServer:
+    def __init__(self, host='localhost', port=5555):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind((host, port))
+        self.server.listen(2) 
+        
+        self.screen_width = 1280
+        self.screen_height = 720
+        self.players = {}
+        self.ball = Ball(
+            pos={'x': 640, 'y': 360},
+            rect={'x': 640, 'y': 360, 'width': 15, 'height': 15},
+            color='white',
+            velocity={'x': 24, 'y': 24}
+        )
+        self.running = True
+        self.game_started = False
+        print(f"Server started on {host}:{port}")
 
-player1 = Player(pygame.Vector2(50, 50), pygame.Rect(50, 50, 10, 100), pygame.Color('blue'))
-player2 = Player(pygame.Vector2(1230, 600), pygame.Rect(1230, 600, 10, 100), pygame.Color('red'))
+    def init_player(self, player_num):
+        if player_num == 1:
+            return Player(
+                pos={'x': 50, 'y': 50},
+                rect={'x': 50, 'y': 50, 'width': 10, 'height': 100},
+                color='blue'
+            )
+        else:
+            return Player(
+                pos={'x': 1230, 'y': 600},
+                rect={'x': 1230, 'y': 600, 'width': 10, 'height': 100},
+                color='red'
+            )
 
-ball = Ball(
-    pos=pygame.Vector2(640, 360),
-    rect=pygame.Rect(640, 360, 15, 15),
-    color=pygame.Color('white'),
-    velocity=pygame.Vector2(randint(-4, 4), randint(-4, 4))
-)
+    def handle_client(self, client_socket, player_num):
+        player = self.init_player(player_num)
+        self.players[player_num] = player
 
-ball.velocity.x = 12
-ball.velocity.y = 12
+        while self.running:
+            try:
+                data = client_socket.recv(1024).decode('utf-8')
+                if not data:
+                    break
+                
+                command = json.loads(data)
+                if 'move' in command:
+                    self.move_player(player_num, command['move'])
+                
+                game_state = self.get_game_state()
+                client_socket.send(json.dumps(game_state).encode('utf-8'))
+                
+            except Exception as e:
+                print(f"Error handling client {player_num}: {e}")
+                break
 
-while running:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+        del self.players[player_num]
+        client_socket.close()
 
-    keys = pygame.key.get_pressed()
-    if keys[pygame.K_UP] and player1.pos.y > 0:
-        player1.pos.y -= 25
-    if keys[pygame.K_DOWN] and player1.pos.y < screen.get_height() - player1.rect.height:
-        player1.pos.y += 25
-    if keys[pygame.K_w] and player2.pos.y > 0:
-        player2.pos.y -= 25
-    if keys[pygame.K_s] and player2.pos.y < screen.get_height() - player2.rect.height:
-        player2.pos.y += 25
+    def move_player(self, player_num, direction):
+        player = self.players[player_num]
+        if direction == 'UP' and player.pos['y'] > 0:
+            player.pos['y'] -= 25
+            player.rect['y'] = player.pos['y']
+        elif direction == 'DOWN' and player.pos['y'] < self.screen_height - player.rect['height']:
+            player.pos['y'] += 25
+            player.rect['y'] = player.pos['y']
 
-    # Update player rects based on positions
-    player1.rect.topleft = player1.pos
-    player2.rect.topleft = player2.pos
+    def update_ball(self):
+        self.ball.pos['x'] += self.ball.velocity['x']
+        self.ball.pos['y'] += self.ball.velocity['y']
+        self.ball.rect['x'] = self.ball.pos['x']
+        self.ball.rect['y'] = self.ball.pos['y']
 
-    ball.pos += ball.velocity
-    ball.rect.topleft = ball.pos
+        if self.ball.rect['y'] <= 0 or self.ball.rect['y'] + self.ball.rect['height'] >= self.screen_height:
+            self.ball.velocity['y'] = -self.ball.velocity['y']
 
-    if ball.rect.top <= 0 or ball.rect.bottom >= screen.get_height():
-        ball.velocity.y = -ball.velocity.y
+        for player in self.players.values():
+            if (self.ball.rect['x'] < player.rect['x'] + player.rect['width'] and
+                self.ball.rect['x'] + self.ball.rect['width'] > player.rect['x'] and
+                self.ball.rect['y'] < player.rect['y'] + player.rect['height'] and
+                self.ball.rect['y'] + self.ball.rect['height'] > player.rect['y']):
+                self.ball.velocity['x'] = -self.ball.velocity['x']
 
-    if ball.rect.colliderect(player1.rect) or ball.rect.colliderect(player2.rect):
-        ball.velocity.x = -ball.velocity.x
+        if self.ball.rect['x'] <= 0 or self.ball.rect['x'] + self.ball.rect['width'] >= self.screen_width:
+            self.ball.pos = {'x': 640, 'y': 360}
+            self.ball.rect['x'] = self.ball.pos['x']
+            self.ball.rect['y'] = self.ball.pos['y']
+            self.ball.velocity = {
+                'x': randint(-4, 4) or 4,
+                'y': randint(-4, 4) or 4
+            }
 
-    if ball.rect.left <= 0 or ball.rect.right >= screen.get_width():
-        ball.pos = pygame.Vector2(640, 360)
-        ball.velocity = pygame.Vector2(randint(-4, 4), randint(-4, 4))
-        if ball.velocity.x == 0:
-            ball.velocity.x = 4
-        if ball.velocity.y == 0:
-            ball.velocity.y = 4
+    def get_game_state(self):
+        return {
+            'players': {str(k): asdict(v) for k, v in self.players.items()},
+            'ball': asdict(self.ball)
+        }
 
-    screen.fill("pink")
-    pygame.draw.rect(screen, player1.color, player1.rect)
-    pygame.draw.rect(screen, player2.color, player2.rect)
-    pygame.draw.rect(screen, ball.color, ball.rect)
+    def game_loop(self):
+        while self.running:
+            if len(self.players) == 2:
+                self.update_ball()
+            time.sleep(1/60)  
 
-    pygame.display.flip()
-    clock.tick(60)
+    def start(self):
+        game_thread = threading.Thread(target=self.game_loop)
+        game_thread.start()
 
-pygame.quit()
+        player_num = 1
+        while self.running:
+            try:
+                client_socket, addr = self.server.accept()
+                if player_num <= 2:
+                    print(f"Player {player_num} connected from {addr}")
+                    client_thread = threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket, player_num)
+                    )
+                    client_thread.start()
+                    player_num += 1
+                else:
+                    client_socket.close()
+            except Exception as e:
+                print(f"Error accepting connection: {e}")
+                break
+
+    def stop(self):
+        self.running = False
+        self.server.close()
+
+if __name__ == "__main__":
+    server = PongServer()
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
+        print("Server stopped")
